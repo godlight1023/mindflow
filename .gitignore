@@ -1,0 +1,26 @@
+# dependencies
+node_modules
+
+# next.js
+/.next/
+/out/
+
+# 验证码存储
+.verification-codes.json
+
+# 环境变量
+.env*.local
+
+# 其他
+.DS_Store
+*.log
+
+# 生产环境编译产物
+build/
+
+# 针对 IDE 的配置（防止协作时产生冲突）
+.vscode/
+.idea/
+
+# Vercel 部署相关的缓存
+.vercel

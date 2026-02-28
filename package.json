@@ -1,0 +1,20 @@
+{
+  "name": "mindflow",
+  "version": "2.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "@auth/supabase-adapter": "^1.11.1",
+    "@supabase/auth-helpers-nextjs": "^0.15.0",
+    "@supabase/supabase-js": "^2.98.0",
+    "next": "14.0.0",
+    "next-auth": "^4.24.5",
+    "nodemailer": "^6.9.0",
+    "react": "18.2.0",
+    "react-dom": "18.2.0"
+  }
+}
