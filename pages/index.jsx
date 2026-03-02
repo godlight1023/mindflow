@@ -1054,7 +1054,7 @@ export default function MindFlow() {
             animation: 'spin 1s linear infinite',
             margin: '0 auto 16px'
           }} />
-          <div style={{ fontSize: '12px', fontWeight: '800', letterSpacing: '2px' }}>LOADING_SYSTEM...</div>
+          <div style={{ fontSize: '12px', fontWeight: '800', letterSpacing: '2px' }}>正在加载系统...</div>
         </div>
       </div>
     );
@@ -1758,7 +1758,7 @@ function MindFlowApp({ userId }) {
                     justifyContent: 'space-between',
                     gap: '20px'
                   }}>
-                    <span>{msg.role === 'user' ? 'Operator' : 'AI Unit'}</span>
+                    <span>{msg.role === 'user' ? '用户' : 'AI'}</span>
                     <span style={{ opacity: 0.6 }}>{msg.time}</span>
                   </div>
                   
@@ -1773,17 +1773,17 @@ function MindFlowApp({ userId }) {
 
                   {msg.tasks && msg.tasks.length > 0 && (
                     <div style={{ marginTop: '16px' }}>
-                      <div style={{
-                        fontSize: '11px',
-                        fontWeight: '700',
-                        color: COLORS.neonBlue,
-                        marginBottom: '12px',
-                        letterSpacing: '0.5px',
-                        borderBottom: `1px solid ${COLORS.neonBlue}20`,
-                        paddingBottom: '8px'
-                      }}>
-                        DETECTED PROTOCOLS [{msg.tasks.length}]
-                      </div>
+              <div style={{
+                fontSize: '11px',
+                fontWeight: '700',
+                color: COLORS.neonBlue,
+                marginBottom: '12px',
+                letterSpacing: '0.5px',
+                borderBottom: `1px solid ${COLORS.neonBlue}20`,
+                paddingBottom: '8px'
+              }}>
+                识别到以下任务 [{msg.tasks.length}]
+              </div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                         {msg.tasks.map((task, i) => {
                           const cat = CATEGORIES[task.category];
@@ -1846,8 +1846,8 @@ function MindFlowApp({ userId }) {
                           boxShadow: msg.tasksAdded ? 'none' : `0 4px 15px ${COLORS.neonBlue}40`
                         }}
                       >
-                        {msg.tasksAdded ? 'PROTOCOL SYNCED' : 'EXECUTE PROTOCOLS'}
-                      </button>
+                          {msg.tasksAdded ? '已同步到清单' : '添加到任务'}
+                        </button>
                     </div>
                   )}
                 </div>
@@ -1884,7 +1884,7 @@ function MindFlowApp({ userId }) {
                   handleSend();
                 }
               }}
-              placeholder={isListening ? 'LISTENING FOR UPLINK...' : '告诉我你要做什么...'}
+              placeholder={isListening ? '正在聆听指令...' : '告诉我你要做什么...'}
               disabled={thinking}
               rows={1}
               style={{
@@ -1951,8 +1951,8 @@ function MindFlowApp({ userId }) {
                 }}
               >
                 {thinking ? (
-                  <span className="thinking-glitch">PROCESSING...</span>
-                ) : (isMobile ? '发送' : 'TRANSMIT')}
+                  <span className="thinking-glitch">正在处理...</span>
+                ) : (isMobile ? '发送' : '确认发送')}
               </button>
             </div>
           </div>
@@ -1984,14 +1984,14 @@ function MindFlowApp({ userId }) {
         value: stats.total, 
         color: COLORS.neonBlue, 
         icon: '📊',
-        detail: `${Math.round(stats.done / stats.total * 100 || 0)}% SYNCED`
+        detail: `${Math.round(stats.done / stats.total * 100 || 0)}% 已完成`
       },
       { 
         label: '已归档', 
         value: stats.done, 
         color: '#10b981', 
         icon: '⚡',
-        detail: `REM: ${stats.pending} UNITS`
+        detail: `剩余: ${stats.pending} 项`
       },
       { 
         label: '活跃进程', 
@@ -1999,17 +1999,17 @@ function MindFlowApp({ userId }) {
         color: '#f59e0b', 
         icon: '🛰️',
         detail: tasks.filter(t => !t.done && t.startTime).length > 0 
-          ? `NEXT: ${tasks.filter(t => !t.done && t.startTime).sort((a, b) => 
+          ? `下一项: ${tasks.filter(t => !t.done && t.startTime).sort((a, b) => 
               (a.startTime || '').localeCompare(b.startTime || '')
             )[0]?.startTime}` 
-          : 'IDLE'
+          : '待机中'
       },
       { 
         label: '心流时长', 
         value: `${stats.focusMinutes}m`, 
         color: '#8b5cf6', 
         icon: '🌀',
-        detail: `EFFICIENCY ${Math.round(stats.focusMinutes / 6)}%`
+        detail: `效率指数 ${Math.round(stats.focusMinutes / 6)}%`
       }
     ].map((stat, i) => (
       <div key={i} style={{
@@ -2286,7 +2286,7 @@ function MindFlowApp({ userId }) {
         borderRadius: '2px',
         boxShadow: `0 0 10px ${COLORS.neonBlue}80`
       }} />
-      {selectedDate === TODAY ? 'TODAY\'S PROTOCOL' : `${selectedDate} PROTOCOL`}
+      任务清单
     </span>
     <button
       onClick={() => setShowAddModal(true)}
@@ -2310,7 +2310,7 @@ function MindFlowApp({ userId }) {
       onMouseOver={(e) => e.target.style.transform = 'translateY(-2px)'}
       onMouseOut={(e) => e.target.style.transform = 'translateY(0)'}
     >
-      <span style={{ fontSize: '16px' }}>+</span> 接入任务
+      <span style={{ fontSize: '16px' }}>+</span> 添加任务
     </button>
   </h2>
 
@@ -2331,9 +2331,9 @@ function MindFlowApp({ userId }) {
       border: `1px solid ${COLORS.glassBorder}`
     }}>
       {[
-        { value: 'all', label: 'ALL', icon: '📋' },
-        { value: 'pending', label: 'ACTIVE', icon: '⏳' },
-        { value: 'done', label: 'SYNCED', icon: '✓' }
+        { value: 'all', label: '全部', icon: '📋' },
+        { value: 'pending', label: '进行中', icon: '⏳' },
+        { value: 'done', label: '已完成', icon: '✓' }
       ].map(filter => (
         <button
           key={filter.value}
@@ -2380,9 +2380,9 @@ function MindFlowApp({ userId }) {
           letterSpacing: '0.5px'
         }}
       >
-        <option value="date">SORT BY DATE</option>
-        <option value="time">SORT BY TIME</option>
-        <option value="category">SORT BY TYPE</option>
+        <option value="date">按日期排序</option>
+        <option value="time">按时间排序</option>
+        <option value="category">按类型排序</option>
       </select>
     </div>
   </div>
@@ -2484,7 +2484,7 @@ function MindFlowApp({ userId }) {
                     color: '#ef4444', 
                     fontWeight: '700' 
                   }}>
-                    OVERDUE
+                    已超时
                   </span>
                 )}
                 {task.startTime && (
@@ -3631,8 +3631,8 @@ function EnergyDetailModal({ energyLevel, tasks, onClose, isMobile = false }) {
             letterSpacing: '2px',
             textTransform: 'uppercase'
           }}>
-            SYSTEM_DIAGNOSTICS
-          </h2>
+              系统诊断
+            </h2>
           <button
             onClick={onClose}
             style={{
