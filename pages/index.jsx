@@ -8,7 +8,10 @@ import {
   calculateRecovery,
   calculateFocusDrain,
   getEnergyData,
-  getEnergyStatus
+  saveEnergyData,
+  getEnergyStatus,
+  calcTaskCompletionDrain,
+  checkOfflineRecovery,
 } from '../lib/energySystem';
 
 // ═══════════════════════════════════════════════════════════════════
@@ -54,7 +57,7 @@ function loadAllData(userId) {
     const ALL_STORAGE_KEY = `mindflow_v4_all_${userId}`;
     const allData = localStorage.getItem(ALL_STORAGE_KEY);
     if (allData) return JSON.parse(allData);
-    
+
     // 尝试迁移旧版本数据
     const OLD_STORAGE_KEY = `mindflow_v4_${userId}`;
     const oldDataStr = localStorage.getItem(OLD_STORAGE_KEY);
@@ -65,7 +68,7 @@ function loadAllData(userId) {
       // 可选：localStorage.removeItem(OLD_STORAGE_KEY);
       return migrated;
     }
-    
+
     return {};
   } catch {
     return {};
@@ -102,15 +105,15 @@ function buildSystemPrompt(existingTasks = []) {
   const now = new Date();
   const time = now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
   const date = now.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
-  
+
   const tomorrow = new Date(now);
   tomorrow.setDate(tomorrow.getDate() + 1);
   const tomorrowDate = tomorrow.toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' });
-  
-  const tasksListStr = existingTasks.length > 0 
+
+  const tasksListStr = existingTasks.length > 0
     ? `\n**当前已存在的任务列表**（请勿重复提取）：\n${existingTasks.map(t => `- ${t.title} (${t.date} ${t.startTime || ''})`).join('\n')}`
     : '';
-  
+
   return `你是 MindFlow AI 秘书。
 
 **重要时间信息**：
@@ -135,12 +138,17 @@ function buildSystemPrompt(existingTasks = []) {
    - 下午 = 14:00
    - 晚上 = 19:00
 
+5. **SMART 原则**（优化任务标题）：
+   - Specific（具体）：动词+对象+量化标准，如"写完项目周报初稿"
+   - Measurable（可衡量）：包含可验证的完成标准
+   - Time-bound（有时限）：结合上下文推断合理开始时间
+
 返回 JSON（无 Markdown）：
 {
   "summary": "确认语（20字内）",
   "tasks": [
     {
-      "title": "任务标题",
+      "title": "任务标题（SMART优化后）",
       "category": "work",
       "duration": 30,
       "startTime": "14:00",
@@ -151,17 +159,61 @@ function buildSystemPrompt(existingTasks = []) {
 }
 
 function buildBreakdownPrompt(title, duration) {
-  return `将任务「${title}」（${duration}分钟）拆解为 3-5 个可执行步骤。
+  return `你是一位擅长第一性原理思维的任务规划专家。请用第一性原理对任务进行拆解。
 
-要求：
-- 每步骤 ≤ 20 分钟
-- 动词开头（打开/列出/写下）
+**第一性原理拆解步骤**：
+1. 剥离假设：先问「这个任务的本质目标是什么？」，去掉所有习惯性做法
+2. 回归基础：找出完成该目标所需的最底层、不可再拆的行动单元
+3. 重构执行链：从基础元素出发，重新构建最高效的执行路径
 
-返回 JSON：
+**待拆解的任务**：「${title}」（预计总时长：${duration} 分钟）
+
+**要求**：
+- 输出 3-5 个步骤，每步骤的时长之和 ≤ ${duration} 分钟
+- 每步骤以动词开头，描述具体行动（≤15字）
+- 步骤之间逻辑递进，从最基础的前置动作到最终交付
+- 不要照搬常规流程，要从本质出发重构
+
+只返回 JSON，无 Markdown：
 [
-  {"text": "动作描述", "est": 15, "done": false}
+  {"text": "具体行动描述", "est": 15, "done": false}
 ]`;
 }
+
+// ── SMART 任务优化提示词 ──────────────────────────────────────────────
+function buildSmartPrompt(title) {
+  const now = new Date();
+  const time = now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
+  const date = now.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
+  const tomorrow = new Date(now);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const tomorrowDate = tomorrow.toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' });
+
+  return `你是任务规划专家，请用 SMART 原则优化用户输入的任务。
+
+**当前时间**：${date} ${time}
+**明天**：${tomorrowDate}
+
+**SMART 原则**：
+- Specific（具体）：动词+对象+量化标准，如"写完项目周报初稿"
+- Measurable（可衡量）：有明确完成标准
+- Achievable（可实现）：单次聚焦，时长合理（30-90分钟）
+- Relevant（相关）：自动判断类型 work/study/life
+- Time-bound（有时限）：给出合理开始时间
+
+**用户原始任务**：「${title}」
+
+只返回 JSON，无 Markdown：
+{
+  "title": "SMART优化后的标题（≤20字，动词开头）",
+  "category": "work",
+  "duration": 45,
+  "startTime": "14:00",
+  "date": "today",
+  "smart_tip": "优化说明（≤30字）"
+}`;
+}
+
 
 // ── AI API 调用 ──────────────────────────────────────────────────
 async function callAI(userInput, promptBuilder) {
@@ -192,15 +244,15 @@ function parseAIResponse(raw) {
     let cleaned = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
     const jsonMatch = cleaned.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
     if (jsonMatch) cleaned = jsonMatch[0];
-    
+
     const parsed = JSON.parse(cleaned);
-    
+
     if (parsed.tasks) {
       const today = getLocalDateString();
       const tomorrow = new Date();
       tomorrow.setDate(tomorrow.getDate() + 1);
       const tomorrowDate = getLocalDateString(tomorrow);
-      
+
       return {
         summary: parsed.summary || '任务已识别',
         tasks: Array.isArray(parsed.tasks) ? parsed.tasks.map((t, i) => {
@@ -210,9 +262,9 @@ function parseAIResponse(raw) {
           } else if (t.date === 'today') {
             taskDate = today;
           }
-          
+
           const uniqueId = `ai_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 7)}`;
-          
+
           return {
             id: uniqueId,
             title: t.title || '未命名任务',
@@ -226,7 +278,7 @@ function parseAIResponse(raw) {
         }) : []
       };
     }
-    
+
     if (Array.isArray(parsed)) {
       return parsed.map((s, i) => ({
         id: `s_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 7)}`,
@@ -235,7 +287,7 @@ function parseAIResponse(raw) {
         done: s.done || false
       }));
     }
-    
+
     return parsed;
   } catch (error) {
     console.error('Parse error:', error);
@@ -249,10 +301,10 @@ function formatDate(dateStr) {
   const tomorrow = new Date();
   tomorrow.setDate(tomorrow.getDate() + 1);
   const tomorrowDate = getLocalDateString(tomorrow);
-  
+
   if (dateStr === today) return '今天';
   if (dateStr === tomorrowDate) return '明天';
-  
+
   const date = new Date(dateStr);
   return `${date.getMonth() + 1}月${date.getDate()}日`;
 }
@@ -261,16 +313,16 @@ function formatDate(dateStr) {
 function checkReminders(tasks) {
   const now = new Date();
   const currentTime = now.getHours() * 60 + now.getMinutes(); // 当前分钟数
-  
+
   tasks.forEach(task => {
     if (task.done || !task.startTime || !task.reminder) return;
-    
+
     // 解析开始时间
     const [hours, minutes] = task.startTime.split(':').map(Number);
     const taskTime = hours * 60 + minutes;
     const reminderMinutes = parseInt(task.reminder) || 0;
     const reminderTime = taskTime - reminderMinutes;
-    
+
     // 检查是否该提醒
     if (Math.abs(currentTime - reminderTime) < 1) {
       // 发送通知
@@ -288,17 +340,17 @@ function checkReminders(tasks) {
 // ── 生成重复任务 ──────────────────────────────────────────────
 function generateRecurringTasks(task, targetDate) {
   if (task.repeat === 'none' || !task.repeat) return null;
-  
+
   // 核心逻辑：只从“原始”任务生成，不从已生成的实例生成
   if (task.id.includes('_20')) {
     return null;
   }
-  
+
   const taskDate = new Date(task.date);
   const target = new Date(targetDate);
-  
+
   let shouldCreate = false;
-  
+
   switch (task.repeat) {
     case 'daily':
       shouldCreate = true;
@@ -314,21 +366,21 @@ function generateRecurringTasks(task, targetDate) {
       shouldCreate = taskDate.getDate() === target.getDate();
       break;
   }
-  
+
   if (shouldCreate && task.date !== targetDate) {
     return {
       ...task,
       id: `${task.id}_${targetDate}`,
       date: targetDate,
       done: false,
-      subtasks: task.subtasks ? task.subtasks.map(s => ({ 
-        ...s, 
-        id: `${s.id}_${targetDate}`, 
-        done: false 
-      })) : [] 
+      subtasks: task.subtasks ? task.subtasks.map(s => ({
+        ...s,
+        id: `${s.id}_${targetDate}`,
+        done: false
+      })) : []
     };
   }
-  
+
   return null;
 }
 
@@ -347,9 +399,14 @@ function EnergyNotification({ type, amount, visible, onClose }) {
   if (!visible) return null;
 
   const isRecovery = type === 'recovery';
-  const color = isRecovery ? '#10b981' : COLORS.neonBlue;
-  const icon = isRecovery ? '🔋' : '⚡';
-  const text = isRecovery ? 'CORE RECOVERY' : 'ENERGY DRAIN';
+  const isOvertime = type === 'overtime';
+  const color = isRecovery ? '#10b981' : isOvertime ? '#f59e0b' : COLORS.neonBlue;
+  const icon = isRecovery ? '🔋' : isOvertime ? '💪' : '⚡';
+  const text = isRecovery
+    ? `精力恢复 +${amount.toFixed(1)}%`
+    : isOvertime
+      ? `长时间专注，辛苦了 -${amount.toFixed(1)}%`
+      : `精力消耗 -${amount.toFixed(1)}%`;
 
   return (
     <div style={{
@@ -367,15 +424,14 @@ function EnergyNotification({ type, amount, visible, onClose }) {
       fontWeight: '800',
       zIndex: 5000,
       boxShadow: `0 0 20px ${color}30`,
-      animation: 'slideUp 0.4s cubic-bezier(0.4, 0, 0.2, 1)',
-      letterSpacing: '1px',
+      letterSpacing: '0.5px',
       display: 'flex',
       alignItems: 'center',
       gap: '12px',
-      textTransform: 'uppercase'
+      whiteSpace: 'nowrap'
     }}>
       <span style={{ fontSize: '18px' }}>{icon}</span>
-      {text} {isRecovery ? '+' : '-'}{amount.toFixed(1)}%
+      {text}
     </div>
   );
 }
@@ -395,6 +451,36 @@ function TaskModal({ task, isNew, onSave, onClose, defaultDate = TODAY, isMobile
     reminder: task?.reminder || '',
     repeat: task?.repeat || 'none'
   });
+  const [smartLoading, setSmartLoading] = useState(false);
+  const [smartTip, setSmartTip] = useState('');
+
+  const handleSmartOptimize = async () => {
+    if (!formData.title.trim() || smartLoading) return;
+    setSmartLoading(true);
+    setSmartTip('');
+    try {
+      const result = await callAI(formData.title, () => buildSmartPrompt(formData.title));
+      if (result && !Array.isArray(result)) {
+        const today = getLocalDateString();
+        const tomorrow = new Date();
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        const tomorrowDate = getLocalDateString(tomorrow);
+        const targetDate = result.date === 'tomorrow' ? tomorrowDate : today;
+        setFormData(prev => ({
+          ...prev,
+          title: result.title || prev.title,
+          category: ['work', 'study', 'life'].includes(result.category) ? result.category : prev.category,
+          duration: typeof result.duration === 'number' ? result.duration : prev.duration,
+          startTime: result.startTime || prev.startTime,
+          date: targetDate || prev.date
+        }));
+        if (result.smart_tip) setSmartTip(result.smart_tip);
+      }
+    } catch (e) {
+      console.error('SMART optimize error:', e);
+    }
+    setSmartLoading(false);
+  };
 
   const handleSubmit = (e) => {
     e.preventDefault();
@@ -455,9 +541,9 @@ function TaskModal({ task, isNew, onSave, onClose, defaultDate = TODAY, isMobile
           gap: '12px',
           letterSpacing: '0.5px'
         }}>
-          <span style={{ 
-            color: COLORS.neonBlue, 
-            textShadow: `0 0 10px ${COLORS.neonBlue}40` 
+          <span style={{
+            color: COLORS.neonBlue,
+            textShadow: `0 0 10px ${COLORS.neonBlue}40`
           }}>
             {isNew ? '✦' : '✏️'}
           </span>
@@ -506,6 +592,77 @@ function TaskModal({ task, isNew, onSave, onClose, defaultDate = TODAY, isMobile
                 e.target.style.boxShadow = 'none';
               }}
             />
+
+            {/* SMART 优化按钮 */}
+            {isNew && (
+              <div style={{ marginTop: '10px', display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  onClick={handleSmartOptimize}
+                  disabled={smartLoading || !formData.title.trim()}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    padding: '8px 16px',
+                    fontSize: '12px',
+                    fontWeight: '600',
+                    color: smartLoading || !formData.title.trim() ? COLORS.textSecondary : COLORS.neonBlue,
+                    background: smartLoading || !formData.title.trim()
+                      ? 'rgba(255,255,255,0.03)'
+                      : `rgba(0, 242, 255, 0.08)`,
+                    border: `1px solid ${smartLoading || !formData.title.trim() ? COLORS.glassBorder : COLORS.neonBlue + '50'}`,
+                    borderRadius: '8px',
+                    cursor: smartLoading || !formData.title.trim() ? 'not-allowed' : 'pointer',
+                    transition: 'all 0.2s ease',
+                    letterSpacing: '0.3px'
+                  }}
+                  onMouseOver={(e) => {
+                    if (!smartLoading && formData.title.trim()) {
+                      e.currentTarget.style.background = `rgba(0, 242, 255, 0.15)`;
+                      e.currentTarget.style.boxShadow = `0 0 12px rgba(0, 242, 255, 0.2)`;
+                    }
+                  }}
+                  onMouseOut={(e) => {
+                    e.currentTarget.style.background = smartLoading || !formData.title.trim() ? 'rgba(255,255,255,0.03)' : `rgba(0, 242, 255, 0.08)`;
+                    e.currentTarget.style.boxShadow = 'none';
+                  }}
+                >
+                  {smartLoading ? (
+                    <>
+                      <span style={{
+                        display: 'inline-block',
+                        width: '12px',
+                        height: '12px',
+                        border: `2px solid ${COLORS.neonBlue}40`,
+                        borderTopColor: COLORS.neonBlue,
+                        borderRadius: '50%',
+                        animation: 'spin 0.8s linear infinite'
+                      }} />
+                      AI 分析中...
+                    </>
+                  ) : (
+                    <>
+                      <span>✨</span>
+                      SMART 自动优化
+                    </>
+                  )}
+                </button>
+                {smartTip && (
+                  <span style={{
+                    fontSize: '11px',
+                    color: COLORS.neonBlue,
+                    opacity: 0.8,
+                    fontStyle: 'italic',
+                    flex: 1,
+                    minWidth: 0,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap'
+                  }}>💡 {smartTip}</span>
+                )}
+              </div>
+            )}
           </div>
 
           {/* 分类 */}
@@ -533,8 +690,8 @@ function TaskModal({ task, isNew, onSave, onClose, defaultDate = TODAY, isMobile
                     fontSize: '13px',
                     fontWeight: '500',
                     color: formData.category === key ? '#fff' : COLORS.textSecondary,
-                    background: formData.category === key 
-                      ? `linear-gradient(135deg, ${cat.color}, ${cat.color}dd)` 
+                    background: formData.category === key
+                      ? `linear-gradient(135deg, ${cat.color}, ${cat.color}dd)`
                       : 'rgba(255, 255, 255, 0.03)',
                     border: `1px solid ${formData.category === key ? 'transparent' : COLORS.glassBorder}`,
                     borderRadius: '10px',
@@ -554,9 +711,9 @@ function TaskModal({ task, isNew, onSave, onClose, defaultDate = TODAY, isMobile
             </div>
           </div>
 
-          <div style={{ 
-            display: 'grid', 
-            gridTemplateColumns: '1fr 1fr', 
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: '1fr 1fr',
             gap: '20px',
             marginBottom: '28px'
           }}>
@@ -590,10 +747,10 @@ function TaskModal({ task, isNew, onSave, onClose, defaultDate = TODAY, isMobile
                     outline: 'none'
                   }}
                 />
-                <span style={{ 
-                  position: 'absolute', 
-                  right: '18px', 
-                  top: '50%', 
+                <span style={{
+                  position: 'absolute',
+                  right: '18px',
+                  top: '50%',
                   transform: 'translateY(-50%)',
                   fontSize: '12px',
                   color: COLORS.textSecondary
@@ -634,9 +791,9 @@ function TaskModal({ task, isNew, onSave, onClose, defaultDate = TODAY, isMobile
           </div>
 
           {/* 开始时间和截止时间 */}
-          <div style={{ 
-            display: 'grid', 
-            gridTemplateColumns: '1fr 1fr', 
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: '1fr 1fr',
             gap: '20px',
             marginBottom: '28px'
           }}>
@@ -702,9 +859,9 @@ function TaskModal({ task, isNew, onSave, onClose, defaultDate = TODAY, isMobile
           </div>
 
           {/* 提醒与重复 */}
-          <div style={{ 
-            display: 'grid', 
-            gridTemplateColumns: '1fr 1fr', 
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: '1fr 1fr',
             gap: '20px',
             marginBottom: '32px'
           }}>
@@ -779,8 +936,8 @@ function TaskModal({ task, isNew, onSave, onClose, defaultDate = TODAY, isMobile
           </div>
 
           {/* 按钮 */}
-          <div style={{ 
-            display: 'flex', 
+          <div style={{
+            display: 'flex',
             gap: '16px',
             marginTop: '12px'
           }}>
@@ -1036,21 +1193,21 @@ export default function MindFlow() {
 
   if (status === 'loading') {
     return (
-      <div style={{ 
-        height: '100vh', 
-        display: 'flex', 
-        alignItems: 'center', 
-        justifyContent: 'center', 
+      <div style={{
+        height: '100vh',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
         background: COLORS.bg,
         color: COLORS.neonBlue
       }}>
         <div style={{ textAlign: 'center' }}>
-          <div style={{ 
-            width: '40px', 
-            height: '40px', 
-            border: `3px solid ${COLORS.neonBlue}20`, 
-            borderTop: `3px solid ${COLORS.neonBlue}`, 
-            borderRadius: '50%', 
+          <div style={{
+            width: '40px',
+            height: '40px',
+            border: `3px solid ${COLORS.neonBlue}20`,
+            borderTop: `3px solid ${COLORS.neonBlue}`,
+            borderRadius: '50%',
             animation: 'spin 1s linear infinite',
             margin: '0 auto 16px'
           }} />
@@ -1077,7 +1234,7 @@ function MindFlowApp({ userId }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [thinking, setThinking] = useState(false);
-  
+
   // ========== 模态框状态 ==========
   const [showAddModal, setShowAddModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
@@ -1111,10 +1268,10 @@ function MindFlowApp({ userId }) {
     if ('Notification' in window && Notification.permission !== 'granted') {
       Notification.requestPermission();
     }
-    
+
     const data = loadAllData(userId);
     const dayData = data[selectedDate] || { tasks: [], energy: 100, messages: [] };
-    
+
     // ID 修复逻辑：确保所有任务都有唯一 ID
     const repairedTasks = (dayData.tasks || []).map((t, i) => {
       if (!t.id || t.id.startsWith('ai_1')) {
@@ -1124,7 +1281,19 @@ function MindFlowApp({ userId }) {
     });
 
     setTasks(repairedTasks);
-    setEnergyLevel(dayData.energy ?? 100);
+
+    // ── 离线补偿：若离线超过 4 小时，精力自动恢复至 100% ──
+    const energyData = getEnergyData(userId);
+    const offlineCheck = checkOfflineRecovery(energyData);
+    if (offlineCheck?.shouldRecover) {
+      console.log(`😴 离线 ${offlineCheck.hoursGone}h，精力已自动恢复至 100%`);
+      const updated = { ...energyData, level: offlineCheck.newLevel, lastActiveTime: Date.now(), lastUpdateTime: Date.now() };
+      saveEnergyData(userId, updated);
+      setEnergyLevel(offlineCheck.newLevel);
+    } else {
+      setEnergyLevel(dayData.energy ?? 100);
+    }
+
     // 更新当前已加载的日期引用，防止保存逻辑错误覆盖
     loadedDateRef.current = selectedDate;
   }, [userId, selectedDate]);
@@ -1142,20 +1311,20 @@ function MindFlowApp({ userId }) {
 
     const timer = setInterval(() => {
       checkReminders(tasks);
-      
+
       // 超时检测
       const now = new Date();
       const currentMinutes = now.getHours() * 60 + now.getMinutes();
-      
+
       setTasks(prev => prev.map(t => {
         if (t.done || !t.startTime) return t;
         const [h, m] = t.startTime.split(':').map(Number);
         const taskMinutes = h * 60 + m;
-        
+
         // 如果是过去的日期，或者今天且超过15分钟
         const isPastDate = t.date < TODAY;
         const isTodayLate = t.date === TODAY && (currentMinutes - taskMinutes > 15);
-        
+
         if (!t.isOverdue && (isPastDate || isTodayLate)) {
           // 第一步：询问是否延后
           if (confirm(`任务「${t.title}」已超时，是否延后到明天？`)) {
@@ -1219,21 +1388,21 @@ function MindFlowApp({ userId }) {
   // ========== 核心操作 ==========
   const handleSend = async () => {
     if (!input.trim() || thinking) return;
-    
+
     const userMsg = { id: Date.now(), role: 'user', text: input, time: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) };
     setMessages(prev => [...prev, userMsg]);
     setInput('');
     setThinking(true);
 
     const result = await callAI(input, () => buildSystemPrompt(tasks));
-    
+
     if (result) {
-      const aiMsg = { 
-        id: Date.now() + 1, 
-        role: 'assistant', 
-        text: result.summary, 
+      const aiMsg = {
+        id: Date.now() + 1,
+        role: 'assistant',
+        text: result.summary,
         tasks: result.tasks,
-        time: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) 
+        time: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
       };
       setMessages(prev => [...prev, aiMsg]);
     }
@@ -1242,34 +1411,45 @@ function MindFlowApp({ userId }) {
 
   const confirmTasks = (msgId, newTasks) => {
     const data = loadAllData(userId);
-    
+
     newTasks.forEach(newTask => {
       const targetDate = newTask.date;
       const dateData = data[targetDate] || { tasks: [], energy: 100, messages: [] };
-      
+
       // 避免重复
       const exists = dateData.tasks.some(t => t.title === newTask.title && t.startTime === newTask.startTime);
       if (!exists) {
         dateData.tasks.push(newTask);
         saveDateData(userId, targetDate, dateData);
-        
+
         // 如果正是当前选中的日期，同步更新 state
         if (targetDate === selectedDate) {
           setTasks(prev => [...prev, newTask]);
         }
       }
     });
-    
+
     setMessages(prev => prev.map(m => m.id === msgId ? { ...m, tasksAdded: true } : m));
   };
 
   const toggleTask = (id) => {
+    const now = Date.now();
     setTasks(prev => prev.map(t => {
       if (t.id === id) {
         const newDone = !t.done;
         if (newDone) {
-          // 完成任务恢复精力 (此处可根据需求开启或关闭)
-          // setEnergyLevel(prev => Math.min(100, prev + 5));
+          // ── 异步结算：根据 duration 和 category 权重一次性扣除精力 ──
+          const { drained, isOvertime, message } = calcTaskCompletionDrain(t, now);
+          const newLevel = drainEnergy(userId, drained, `完成任务: ${t.title}`);
+          if (newLevel !== undefined) setEnergyLevel(newLevel);
+
+          if (isOvertime && message) {
+            // 时间溢出：显示专属提示
+            setEnergyNotification({ visible: true, type: 'overtime', amount: drained });
+          } else {
+            setEnergyNotification({ visible: true, type: 'drain', amount: drained });
+          }
+          setTimeout(() => setEnergyNotification(n => ({ ...n, visible: false })), 3000);
         }
         return { ...t, done: newDone };
       }
@@ -1282,9 +1462,9 @@ function MindFlowApp({ userId }) {
       if (t.id === id) {
         // 如果任务被修改了时间或日期，或者明确设置了 isOverdue: false，则重置超时标记
         const isTimeUpdated = updates.startTime !== undefined || updates.date !== undefined;
-        return { 
-          ...t, 
-          ...updates, 
+        return {
+          ...t,
+          ...updates,
           isOverdue: isTimeUpdated ? false : (updates.isOverdue ?? t.isOverdue)
         };
       }
@@ -1360,7 +1540,7 @@ function MindFlowApp({ userId }) {
       done: false,
       subtasks: []
     };
-    
+
     // 如果日期匹配，更新当前 state，否则直接保存到对应日期
     if (targetDate === selectedDate) {
       setTasks(prev => [...prev, newTask]);
@@ -1370,14 +1550,14 @@ function MindFlowApp({ userId }) {
       dateData.tasks.push(newTask);
       saveDateData(userId, targetDate, dateData);
     }
-    
+
     setShowAddModal(false);
   };
 
   const breakdownTask = async (id) => {
     const task = tasks.find(t => t.id === id);
     if (!task) return;
-    
+
     setThinking(true);
     const subtasks = await callAI(`拆解任务：${task.title}`, () => buildBreakdownPrompt(task.title, task.duration));
     if (subtasks) {
@@ -1398,7 +1578,6 @@ function MindFlowApp({ userId }) {
             ...t,
             subtasks: t.subtasks.map(s => s.id === subId ? { ...s, done: !s.done } : s)
           };
-          // 如果当前任务是专注任务，也更新 focusTask
           if (focusTask?.id === taskId) {
             setFocusTask(updatedTask);
           }
@@ -1428,10 +1607,10 @@ function MindFlowApp({ userId }) {
   // 过滤器逻辑
   const getFilteredTasks = useMemo(() => {
     let filtered = [...tasks];
-    
+
     if (taskFilter === 'pending') filtered = filtered.filter(t => !t.done);
     if (taskFilter === 'done') filtered = filtered.filter(t => t.done);
-    
+
     return filtered.sort((a, b) => {
       if (taskSort === 'time') {
         const timeA = a.startTime || '99:99';
@@ -1462,16 +1641,16 @@ function MindFlowApp({ userId }) {
     const month = viewMonth.getMonth();
     const firstDay = new Date(year, month, 1);
     const lastDay = new Date(year, month + 1, 0);
-    
+
     const days = [];
     const startOffset = firstDay.getDay();
-    
+
     // 填充月初空白
     for (let i = 0; i < startOffset; i++) {
       const d = new Date(year, month, -i);
       days.unshift({ date: getLocalDateString(d), day: d.getDate(), isCurrentMonth: false });
     }
-    
+
     // 填充当月
     const allData = loadAllData(userId);
     for (let i = 1; i <= lastDay.getDate(); i++) {
@@ -1488,7 +1667,7 @@ function MindFlowApp({ userId }) {
         total: dayData.tasks?.length || 0
       });
     }
-    
+
     return days;
   };
 
@@ -1496,12 +1675,12 @@ function MindFlowApp({ userId }) {
     const allData = loadAllData(userId);
     let currentStreak = 0;
     let checkDate = new Date();
-    
+
     while (true) {
       const dateStr = getLocalDateString(checkDate);
       const dayData = allData[dateStr];
       const isDone = dayData?.tasks?.length > 0 && dayData.tasks.every(t => t.done);
-      
+
       if (isDone) {
         currentStreak++;
         checkDate.setDate(checkDate.getDate() - 1);
@@ -1509,7 +1688,7 @@ function MindFlowApp({ userId }) {
         // 如果不是今天且没完成，中断；如果是今天且没完成，继续看昨天
         if (dateStr === TODAY) {
           checkDate.setDate(checkDate.getDate() - 1);
-          continue; 
+          continue;
         }
         break;
       }
@@ -1685,10 +1864,10 @@ function MindFlowApp({ userId }) {
         </div>
 
         {/* 能量球区域 */}
-        <div 
+        <div
           onClick={() => setShowEnergyDetail(true)}
-          style={{ 
-            cursor: 'pointer', 
+          style={{
+            cursor: 'pointer',
             flexShrink: 0,
             transition: 'all 0.3s ease',
             position: 'relative'
@@ -1715,8 +1894,8 @@ function MindFlowApp({ userId }) {
               color: COLORS.textSecondary,
               opacity: 0.6
             }}>
-              <div style={{ 
-                fontSize: '48px', 
+              <div style={{
+                fontSize: '48px',
                 marginBottom: '20px',
                 filter: `drop-shadow(0 0 10px ${COLORS.neonBlue}40)`
               }}>📡</div>
@@ -1729,7 +1908,7 @@ function MindFlowApp({ userId }) {
             </div>
           ) : (
             messages.map((msg) => (
-              <div key={msg.id} style={{ 
+              <div key={msg.id} style={{
                 display: 'flex',
                 flexDirection: 'column',
                 alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start',
@@ -1737,7 +1916,7 @@ function MindFlowApp({ userId }) {
               }}>
                 <div style={{
                   maxWidth: '85%',
-                  background: msg.role === 'user' 
+                  background: msg.role === 'user'
                     ? `linear-gradient(135deg, ${COLORS.neonBlue}20, ${COLORS.accent}20)`
                     : 'rgba(255, 255, 255, 0.03)',
                   backdropFilter: 'blur(10px)',
@@ -1761,7 +1940,7 @@ function MindFlowApp({ userId }) {
                     <span>{msg.role === 'user' ? '用户' : 'AI'}</span>
                     <span style={{ opacity: 0.6 }}>{msg.time}</span>
                   </div>
-                  
+
                   <div style={{
                     fontSize: '14px',
                     color: COLORS.textMain,
@@ -1773,17 +1952,17 @@ function MindFlowApp({ userId }) {
 
                   {msg.tasks && msg.tasks.length > 0 && (
                     <div style={{ marginTop: '16px' }}>
-              <div style={{
-                fontSize: '11px',
-                fontWeight: '700',
-                color: COLORS.neonBlue,
-                marginBottom: '12px',
-                letterSpacing: '0.5px',
-                borderBottom: `1px solid ${COLORS.neonBlue}20`,
-                paddingBottom: '8px'
-              }}>
-                识别到以下任务 [{msg.tasks.length}]
-              </div>
+                      <div style={{
+                        fontSize: '11px',
+                        fontWeight: '700',
+                        color: COLORS.neonBlue,
+                        marginBottom: '12px',
+                        letterSpacing: '0.5px',
+                        borderBottom: `1px solid ${COLORS.neonBlue}20`,
+                        paddingBottom: '8px'
+                      }}>
+                        识别到以下任务 [{msg.tasks.length}]
+                      </div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                         {msg.tasks.map((task, i) => {
                           const cat = CATEGORIES[task.category];
@@ -1801,7 +1980,7 @@ function MindFlowApp({ userId }) {
                                 gap: '8px',
                                 marginBottom: '6px'
                               }}>
-                                <span style={{ 
+                                <span style={{
                                   color: cat.color,
                                   textShadow: `0 0 8px ${cat.color}40`
                                 }}>{cat.icon}</span>
@@ -1833,8 +2012,8 @@ function MindFlowApp({ userId }) {
                           padding: '12px',
                           marginTop: '12px',
                           background: msg.tasksAdded
-                              ? 'rgba(255, 255, 255, 0.05)'
-                              : `linear-gradient(135deg, ${COLORS.neonBlue}, ${COLORS.accent})`,
+                            ? 'rgba(255, 255, 255, 0.05)'
+                            : `linear-gradient(135deg, ${COLORS.neonBlue}, ${COLORS.accent})`,
                           border: msg.tasksAdded ? `1px solid ${COLORS.glassBorder}` : 'none',
                           borderRadius: '12px',
                           color: '#fff',
@@ -1846,8 +2025,8 @@ function MindFlowApp({ userId }) {
                           boxShadow: msg.tasksAdded ? 'none' : `0 4px 15px ${COLORS.neonBlue}40`
                         }}
                       >
-                          {msg.tasksAdded ? '已同步到清单' : '添加到任务'}
-                        </button>
+                        {msg.tasksAdded ? '已同步到清单' : '添加到任务'}
+                      </button>
                     </div>
                   )}
                 </div>
@@ -1902,7 +2081,7 @@ function MindFlowApp({ userId }) {
                 letterSpacing: '0.5px'
               }}
             />
-            
+
             <div style={{
               display: 'flex',
               justifyContent: 'space-between',
@@ -1972,97 +2151,97 @@ function MindFlowApp({ userId }) {
         position: 'relative'
       }}>
         {/* 统计卡片 */}
-  <div style={{
-    display: 'grid',
-    gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)',
-    gap: isMobile ? '16px' : '20px',
-    marginBottom: '32px'
-  }}>
-    {[
-      { 
-        label: '任务负载', 
-        value: stats.total, 
-        color: COLORS.neonBlue, 
-        icon: '📊',
-        detail: `${Math.round(stats.done / stats.total * 100 || 0)}% 已完成`
-      },
-      { 
-        label: '已归档', 
-        value: stats.done, 
-        color: '#10b981', 
-        icon: '⚡',
-        detail: `剩余: ${stats.pending} 项`
-      },
-      { 
-        label: '活跃进程', 
-        value: stats.pending, 
-        color: '#f59e0b', 
-        icon: '🛰️',
-        detail: tasks.filter(t => !t.done && t.startTime).length > 0 
-          ? `下一项: ${tasks.filter(t => !t.done && t.startTime).sort((a, b) => 
-              (a.startTime || '').localeCompare(b.startTime || '')
-            )[0]?.startTime}` 
-          : '待机中'
-      },
-      { 
-        label: '心流时长', 
-        value: `${stats.focusMinutes}m`, 
-        color: '#8b5cf6', 
-        icon: '🌀',
-        detail: `效率指数 ${Math.round(stats.focusMinutes / 6)}%`
-      }
-    ].map((stat, i) => (
-      <div key={i} style={{
-        padding: '24px',
-        background: 'rgba(255, 255, 255, 0.03)',
-        backdropFilter: 'blur(10px)',
-        border: `1px solid ${COLORS.glassBorder}`,
-        borderRadius: '20px',
-        transition: 'all 0.3s ease',
-        cursor: 'default',
-        position: 'relative',
-        overflow: 'hidden'
-      }}>
         <div style={{
-          position: 'absolute',
-          top: 0, right: 0, width: '40px', height: '40px',
-          background: `radial-gradient(circle at top right, ${stat.color}15, transparent)`,
-        }} />
-        <div style={{ fontSize: '20px', marginBottom: '12px', opacity: 0.8 }}>
-          {stat.icon}
-        </div>
-        <div style={{
-          fontSize: '28px',
-          fontWeight: '800',
-          color: stat.color,
-          marginBottom: '6px',
-          letterSpacing: '-0.5px',
-          textShadow: `0 0 15px ${stat.color}30`
+          display: 'grid',
+          gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)',
+          gap: isMobile ? '16px' : '20px',
+          marginBottom: '32px'
         }}>
-          {stat.value}
+          {[
+            {
+              label: '任务负载',
+              value: stats.total,
+              color: COLORS.neonBlue,
+              icon: '📊',
+              detail: `${Math.round(stats.done / stats.total * 100 || 0)}% 已完成`
+            },
+            {
+              label: '已归档',
+              value: stats.done,
+              color: '#10b981',
+              icon: '⚡',
+              detail: `剩余: ${stats.pending} 项`
+            },
+            {
+              label: '活跃进程',
+              value: stats.pending,
+              color: '#f59e0b',
+              icon: '🛰️',
+              detail: tasks.filter(t => !t.done && t.startTime).length > 0
+                ? `下一项: ${tasks.filter(t => !t.done && t.startTime).sort((a, b) =>
+                  (a.startTime || '').localeCompare(b.startTime || '')
+                )[0]?.startTime}`
+                : '待机中'
+            },
+            {
+              label: '心流时长',
+              value: `${stats.focusMinutes}m`,
+              color: '#8b5cf6',
+              icon: '🌀',
+              detail: `效率指数 ${Math.round(stats.focusMinutes / 6)}%`
+            }
+          ].map((stat, i) => (
+            <div key={i} style={{
+              padding: '24px',
+              background: 'rgba(255, 255, 255, 0.03)',
+              backdropFilter: 'blur(10px)',
+              border: `1px solid ${COLORS.glassBorder}`,
+              borderRadius: '20px',
+              transition: 'all 0.3s ease',
+              cursor: 'default',
+              position: 'relative',
+              overflow: 'hidden'
+            }}>
+              <div style={{
+                position: 'absolute',
+                top: 0, right: 0, width: '40px', height: '40px',
+                background: `radial-gradient(circle at top right, ${stat.color}15, transparent)`,
+              }} />
+              <div style={{ fontSize: '20px', marginBottom: '12px', opacity: 0.8 }}>
+                {stat.icon}
+              </div>
+              <div style={{
+                fontSize: '28px',
+                fontWeight: '800',
+                color: stat.color,
+                marginBottom: '6px',
+                letterSpacing: '-0.5px',
+                textShadow: `0 0 15px ${stat.color}30`
+              }}>
+                {stat.value}
+              </div>
+              <div style={{
+                fontSize: '11px',
+                color: COLORS.textSecondary,
+                marginBottom: '4px',
+                fontWeight: '600',
+                textTransform: 'uppercase',
+                letterSpacing: '0.5px'
+              }}>
+                {stat.label}
+              </div>
+              <div style={{
+                fontSize: '10px',
+                color: stat.color,
+                fontWeight: '700',
+                letterSpacing: '1px',
+                opacity: 0.8
+              }}>
+                {stat.detail}
+              </div>
+            </div>
+          ))}
         </div>
-        <div style={{ 
-          fontSize: '11px', 
-          color: COLORS.textSecondary, 
-          marginBottom: '4px',
-          fontWeight: '600',
-          textTransform: 'uppercase',
-          letterSpacing: '0.5px'
-        }}>
-          {stat.label}
-        </div>
-        <div style={{ 
-          fontSize: '10px', 
-          color: stat.color,
-          fontWeight: '700',
-          letterSpacing: '1px',
-          opacity: 0.8
-        }}>
-          {stat.detail}
-        </div>
-      </div>
-    ))}
-  </div>      
 
         {/* 打卡日历 (月视图) */}
         <div style={{
@@ -2124,9 +2303,9 @@ function MindFlowApp({ userId }) {
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: isMobile ? '8px' : '12px' }}>
               {!isMobile && (
-                <div style={{ 
-                  fontSize: '11px', 
-                  color: '#10b981', 
+                <div style={{
+                  fontSize: '11px',
+                  color: '#10b981',
                   fontWeight: '700',
                   background: 'rgba(16, 185, 129, 0.1)',
                   padding: '4px 10px',
@@ -2207,10 +2386,10 @@ function MindFlowApp({ userId }) {
                 style={{
                   position: 'relative',
                   padding: isMobile ? '8px 2px' : '12px 4px',
-                  background: day.isSelected 
-                    ? `rgba(0, 242, 255, 0.15)` 
-                    : day.completed > 0 
-                      ? 'rgba(16, 185, 129, 0.05)' 
+                  background: day.isSelected
+                    ? `rgba(0, 242, 255, 0.15)`
+                    : day.completed > 0
+                      ? 'rgba(16, 185, 129, 0.05)'
                       : 'transparent',
                   border: day.isSelected
                     ? `1px solid ${COLORS.neonBlue}`
@@ -2267,412 +2446,412 @@ function MindFlowApp({ userId }) {
           flex: 1,
           boxShadow: `0 4px 24px -1px rgba(0, 0, 0, 0.2)`
         }}>
- 
-<h2 style={{
-    fontSize: '20px',
-    fontWeight: '800',
-    color: COLORS.textMain,
-    marginBottom: '24px',
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    letterSpacing: '0.5px'
-  }}>
-    <span style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-      <span style={{ 
-        width: '4px', 
-        height: '24px', 
-        background: COLORS.neonBlue, 
-        borderRadius: '2px',
-        boxShadow: `0 0 10px ${COLORS.neonBlue}80`
-      }} />
-      任务清单
-    </span>
-    <button
-      onClick={() => setShowAddModal(true)}
-      style={{
-        padding: '10px 20px',
-        fontSize: '12px',
-        fontWeight: '700',
-        color: '#fff',
-        background: `linear-gradient(135deg, ${COLORS.neonBlue}, ${COLORS.accent})`,
-        border: 'none',
-        borderRadius: '12px',
-        cursor: 'pointer',
-        display: 'flex',
-        alignItems: 'center',
-        gap: '8px',
-        boxShadow: `0 4px 15px ${COLORS.neonBlue}40`,
-        transition: 'all 0.3s ease',
-        textTransform: 'uppercase',
-        letterSpacing: '1px'
-      }}
-      onMouseOver={(e) => e.target.style.transform = 'translateY(-2px)'}
-      onMouseOut={(e) => e.target.style.transform = 'translateY(0)'}
-    >
-      <span style={{ fontSize: '16px' }}>+</span> 添加任务
-    </button>
-  </h2>
 
-  {/* 过滤器 UI */}
-  <div style={{
-    display: 'flex',
-    gap: '12px',
-    marginBottom: '24px',
-    flexWrap: 'wrap',
-    alignItems: 'center'
-  }}>
-    {/* 状态过滤按钮组 */}
-    <div style={{ 
-      display: 'flex', 
-      background: 'rgba(255, 255, 255, 0.03)', 
-      padding: '4px', 
-      borderRadius: '12px',
-      border: `1px solid ${COLORS.glassBorder}`
-    }}>
-      {[
-        { value: 'all', label: '全部', icon: '📋' },
-        { value: 'pending', label: '进行中', icon: '⏳' },
-        { value: 'done', label: '已完成', icon: '✓' }
-      ].map(filter => (
-        <button
-          key={filter.value}
-          onClick={() => setTaskFilter(filter.value)}
-          style={{
-            padding: '8px 16px',
-            fontSize: '11px',
-            fontWeight: '700',
-            color: taskFilter === filter.value ? '#fff' : COLORS.textSecondary,
-            background: taskFilter === filter.value
-              ? `linear-gradient(135deg, ${COLORS.neonBlue}, ${COLORS.accent})`
-              : 'transparent',
-            border: 'none',
-            borderRadius: '8px',
-            cursor: 'pointer',
-            transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-            letterSpacing: '1px',
-            boxShadow: taskFilter === filter.value ? `0 4px 12px ${COLORS.neonBlue}40` : 'none'
-          }}
-        >
-          {filter.label}
-        </button>
-      ))}
-    </div>
+          <h2 style={{
+            fontSize: '20px',
+            fontWeight: '800',
+            color: COLORS.textMain,
+            marginBottom: '24px',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            letterSpacing: '0.5px'
+          }}>
+            <span style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <span style={{
+                width: '4px',
+                height: '24px',
+                background: COLORS.neonBlue,
+                borderRadius: '2px',
+                boxShadow: `0 0 10px ${COLORS.neonBlue}80`
+              }} />
+              任务清单
+            </span>
+            <button
+              onClick={() => setShowAddModal(true)}
+              style={{
+                padding: '10px 20px',
+                fontSize: '12px',
+                fontWeight: '700',
+                color: '#fff',
+                background: `linear-gradient(135deg, ${COLORS.neonBlue}, ${COLORS.accent})`,
+                border: 'none',
+                borderRadius: '12px',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                boxShadow: `0 4px 15px ${COLORS.neonBlue}40`,
+                transition: 'all 0.3s ease',
+                textTransform: 'uppercase',
+                letterSpacing: '1px'
+              }}
+              onMouseOver={(e) => e.target.style.transform = 'translateY(-2px)'}
+              onMouseOut={(e) => e.target.style.transform = 'translateY(0)'}
+            >
+              <span style={{ fontSize: '16px' }}>+</span> 添加任务
+            </button>
+          </h2>
 
-    {/* 排序下拉框 */}
-    <div style={{ position: 'relative', flex: isMobile ? '1' : 'none' }}>
-      <select
-        value={taskSort}
-        onChange={(e) => setTaskSort(e.target.value)}
-        style={{
-          width: '100%',
-          padding: '10px 16px',
-          paddingRight: '32px',
-          fontSize: '11px',
-          fontWeight: '600',
-          color: COLORS.textMain,
-          background: 'rgba(255, 255, 255, 0.03)',
-          border: `1px solid ${COLORS.glassBorder}`,
-          borderRadius: '10px',
-          outline: 'none',
-          cursor: 'pointer',
-          appearance: 'none',
-          letterSpacing: '0.5px'
-        }}
-      >
-        <option value="date">按日期排序</option>
-        <option value="time">按时间排序</option>
-        <option value="category">按类型排序</option>
-      </select>
-    </div>
-  </div>
-
-  <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', paddingBottom: '120px' }}>
-    {getFilteredTasks.map((task) => {
-      const cat = CATEGORIES[task.category];
-      return (
-        <div key={task.id} style={{
-            padding: '20px',
-            background: 'rgba(255, 255, 255, 0.03)',
-            border: `1px solid ${task.done ? 'rgba(16, 185, 129, 0.2)' : COLORS.glassBorder}`,
-            borderRadius: '16px',
-            transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-            position: 'relative',
-            overflow: 'hidden',
-            boxShadow: task.done ? 'none' : `0 4px 12px rgba(0,0,0,0.1)`
-        }}>
-          {!task.done && (
-            <div style={{
-              position: 'absolute',
-              top: 0, left: 0, width: '2px', height: '100%',
-              background: cat.color,
-              boxShadow: `0 0 8px ${cat.color}`
-            }} />
-          )}
-
+          {/* 过滤器 UI */}
           <div style={{
             display: 'flex',
-            flexDirection: isMobile ? 'column' : 'row',
-            alignItems: isMobile ? 'flex-start' : 'center',
-            gap: '16px',
-            marginBottom: task.subtasks?.length > 0 ? '16px' : 0
+            gap: '12px',
+            marginBottom: '24px',
+            flexWrap: 'wrap',
+            alignItems: 'center'
           }}>
-            <div style={{ display: 'flex', gap: '16px', width: isMobile ? '100%' : 'auto', alignItems: 'center' }}>
-              <button
-                onClick={() => toggleTask(task.id)}
-                style={{
-                  width: '24px',
-                  height: '24px',
-                  borderRadius: '6px',
-                  border: task.done ? 'none' : `2px solid ${COLORS.glassBorder}`,
-                  background: task.done ? '#10b981' : 'transparent',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  cursor: 'pointer',
-                  color: '#fff',
-                  fontSize: '14px',
-                  flexShrink: 0,
-                  transition: 'all 0.3s ease',
-                  boxShadow: task.done ? '0 0 10px rgba(16, 185, 129, 0.4)' : 'none'
-                }}
-              >
-                {task.done && '✓'}
-              </button>
-
-              <div style={{ flex: 1 }}>
-                <div 
-                  onClick={() => {
-                    setEditingTask(task);
-                    setShowEditModal(true);
-                  }}
-                  style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}
-                >
-                  <span style={{ 
-                    fontSize: '15px',
-                    fontWeight: '600',
-                    color: task.done ? COLORS.textSecondary : COLORS.textMain,
-                    textDecoration: task.done ? 'line-through' : 'none',
-                    transition: 'all 0.3s ease',
-                    letterSpacing: '0.3px'
-                  }}>
-                    {task.title}
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            <div style={{ flex: 1, width: '100%' }}>
-              <div style={{ display: 'flex', gap: '8px', fontSize: '10px', color: COLORS.textSecondary, flexWrap: 'wrap' }}>
-                <span style={{ 
-                  padding: '3px 10px', 
-                  borderRadius: '6px', 
-                  background: 'rgba(255, 255, 255, 0.03)', 
-                  border: `1px solid ${COLORS.glassBorder}`,
-                  color: cat.color,
-                  fontWeight: '700',
-                  textTransform: 'uppercase'
-                }}>
-                  {cat.label}
-                </span>
-                {task.isOverdue && !task.done && (
-                  <span style={{ 
-                    padding: '3px 10px', 
-                    borderRadius: '6px', 
-                    background: 'rgba(239, 68, 68, 0.1)', 
-                    border: '1px solid rgba(239, 68, 68, 0.2)',
-                    color: '#ef4444', 
-                    fontWeight: '700' 
-                  }}>
-                    已超时
-                  </span>
-                )}
-                {task.startTime && (
-                  <span style={{ 
-                    padding: '3px 10px', 
-                    borderRadius: '6px', 
-                    background: 'rgba(255, 255, 255, 0.03)', 
-                    border: `1px solid ${COLORS.glassBorder}`,
-                    color: COLORS.neonBlue
-                  }}>
-                    {task.startTime}
-                  </span>
-                )}
-                <span style={{ 
-                  padding: '3px 10px', 
-                  borderRadius: '6px', 
-                  background: 'rgba(255, 255, 255, 0.03)', 
-                  border: `1px solid ${COLORS.glassBorder}`
-                }}>
-                  {task.duration}m
-                </span>
-              </div>
-            </div>
-
-            <div style={{ 
-              display: 'flex', 
-              gap: '10px', 
-              flexShrink: 0,
-              width: isMobile ? '100%' : 'auto',
-              justifyContent: isMobile ? 'space-between' : 'flex-start',
-              marginTop: isMobile ? '8px' : '0'
+            {/* 状态过滤按钮组 */}
+            <div style={{
+              display: 'flex',
+              background: 'rgba(255, 255, 255, 0.03)',
+              padding: '4px',
+              borderRadius: '12px',
+              border: `1px solid ${COLORS.glassBorder}`
             }}>
-              {!task.done && !task.subtasks?.length && (
-                <button 
-                  onClick={() => breakdownTask(task.id)} 
-                  style={{ 
-                    flex: isMobile ? 1 : 'none',
-                    padding: '8px 14px', 
-                    background: 'transparent', 
-                    border: `1px solid ${COLORS.neonBlue}40`, 
-                    borderRadius: '8px', 
-                    color: COLORS.neonBlue, 
-                    fontSize: '11px', 
+              {[
+                { value: 'all', label: '全部', icon: '📋' },
+                { value: 'pending', label: '进行中', icon: '⏳' },
+                { value: 'done', label: '已完成', icon: '✓' }
+              ].map(filter => (
+                <button
+                  key={filter.value}
+                  onClick={() => setTaskFilter(filter.value)}
+                  style={{
+                    padding: '8px 16px',
+                    fontSize: '11px',
                     fontWeight: '700',
-                    cursor: 'pointer'
+                    color: taskFilter === filter.value ? '#fff' : COLORS.textSecondary,
+                    background: taskFilter === filter.value
+                      ? `linear-gradient(135deg, ${COLORS.neonBlue}, ${COLORS.accent})`
+                      : 'transparent',
+                    border: 'none',
+                    borderRadius: '8px',
+                    cursor: 'pointer',
+                    transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                    letterSpacing: '1px',
+                    boxShadow: taskFilter === filter.value ? `0 4px 12px ${COLORS.neonBlue}40` : 'none'
                   }}
                 >
-                  拆解
+                  {filter.label}
                 </button>
-              )}
-              {!task.done && (
-                <button 
-                  onClick={() => startFocus(task)} 
-                  style={{ 
-                    flex: isMobile ? 1 : 'none',
-                    padding: '8px 14px', 
-                    background: `linear-gradient(135deg, ${COLORS.neonBlue}, ${COLORS.accent})`, 
-                    border: 'none', 
-                    borderRadius: '8px', 
-                    color: '#fff', 
-                    fontSize: '11px', 
-                    fontWeight: '700',
-                    cursor: 'pointer'
-                  }}
-                >
-                  专注
-                </button>
-              )}
-              <button 
-                onClick={() => deleteTask(task.id)} 
-                style={{ 
-                  flex: isMobile ? 1 : 'none',
-                  padding: '8px 14px', 
-                  background: 'transparent', 
-                  border: `1px solid rgba(239, 68, 68, 0.2)`, 
-                  borderRadius: '8px', 
-                  color: '#ef4444', 
-                  fontSize: '11px', 
-                  fontWeight: '700',
-                  cursor: 'pointer'
+              ))}
+            </div>
+
+            {/* 排序下拉框 */}
+            <div style={{ position: 'relative', flex: isMobile ? '1' : 'none' }}>
+              <select
+                value={taskSort}
+                onChange={(e) => setTaskSort(e.target.value)}
+                style={{
+                  width: '100%',
+                  padding: '10px 16px',
+                  paddingRight: '32px',
+                  fontSize: '11px',
+                  fontWeight: '600',
+                  color: COLORS.textMain,
+                  background: 'rgba(255, 255, 255, 0.03)',
+                  border: `1px solid ${COLORS.glassBorder}`,
+                  borderRadius: '10px',
+                  outline: 'none',
+                  cursor: 'pointer',
+                  appearance: 'none',
+                  letterSpacing: '0.5px'
                 }}
               >
-                删除
-              </button>
+                <option value="date">按日期排序</option>
+                <option value="time">按时间排序</option>
+                <option value="category">按类型排序</option>
+              </select>
             </div>
           </div>
 
-          {task.subtasks?.length > 0 && (
-            <div style={{ marginLeft: '36px', paddingLeft: '16px', borderLeft: '2px solid rgba(99, 179, 237, 0.2)' }}>
-              {task.subtasks.map((sub, i) => (
-                <div 
-                  key={sub.id} 
-                  className="subtask-item"
-                  style={{ 
-                    display: 'flex', 
-                    alignItems: 'center', 
-                    gap: '8px', 
-                    padding: '8px', 
-                    marginBottom: '4px', 
-                    borderRadius: '6px', 
-                    background: sub.done ? 'rgba(16, 185, 129, 0.05)' : 'transparent',
-                    transition: 'all 0.2s ease',
-                    position: 'relative',
-                  }}
-                >
-                   <div 
-                    onClick={() => toggleSubtask(task.id, sub.id)} 
-                    style={{ 
-                      width: '16px', 
-                      height: '16px', 
-                      borderRadius: '50%', 
-                      border: sub.done ? '2px solid #10b981' : '2px solid rgba(99, 179, 237, 0.3)', 
-                      background: sub.done ? '#10b981' : 'transparent', 
-                      cursor: 'pointer', 
-                      display: 'flex', 
-                      alignItems: 'center', 
-                      justifyContent: 'center', 
-                      fontSize: '10px', 
-                      color: '#fff',
-                      flexShrink: 0
-                    }}
-                  >
-                    {sub.done && '✓'}
-                  </div>
-                   <span style={{ 
-                    fontSize: '13px', 
-                    color: sub.done ? '#94a3b8' : '#cbd5e1', 
-                    textDecoration: sub.done ? 'line-through' : 'none',
-                    flex: 1,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap'
-                  }}>
-                    {i + 1}. {sub.text}
-                  </span>
-                  
-                  {/* 子任务操作按钮 */}
-                  <div className="subtask-actions" style={{
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', paddingBottom: '120px' }}>
+            {getFilteredTasks.map((task) => {
+              const cat = CATEGORIES[task.category];
+              return (
+                <div key={task.id} style={{
+                  padding: '20px',
+                  background: 'rgba(255, 255, 255, 0.03)',
+                  border: `1px solid ${task.done ? 'rgba(16, 185, 129, 0.2)' : COLORS.glassBorder}`,
+                  borderRadius: '16px',
+                  transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                  position: 'relative',
+                  overflow: 'hidden',
+                  boxShadow: task.done ? 'none' : `0 4px 12px rgba(0,0,0,0.1)`
+                }}>
+                  {!task.done && (
+                    <div style={{
+                      position: 'absolute',
+                      top: 0, left: 0, width: '2px', height: '100%',
+                      background: cat.color,
+                      boxShadow: `0 0 8px ${cat.color}`
+                    }} />
+                  )}
+
+                  <div style={{
                     display: 'flex',
-                    gap: '8px',
-                    opacity: isMobile ? 0.6 : 0,
-                    transition: 'opacity 0.2s ease'
+                    flexDirection: isMobile ? 'column' : 'row',
+                    alignItems: isMobile ? 'flex-start' : 'center',
+                    gap: '16px',
+                    marginBottom: task.subtasks?.length > 0 ? '16px' : 0
                   }}>
-                    <button
-                      onClick={() => setEditingSubtask({ taskId: task.id, subtask: sub })}
-                      style={{
-                        background: 'transparent',
-                        border: 'none',
-                        color: '#00f2ff',
-                        fontSize: '12px',
-                        cursor: 'pointer',
-                        padding: '2px 4px',
-                        borderRadius: '4px',
-                        opacity: 0.6
-                      }}
-                      onMouseOver={(e) => e.target.style.opacity = 1}
-                      onMouseOut={(e) => e.target.style.opacity = 0.6}
-                      title="编辑"
-                    >
-                      ✏️
-                    </button>
-                    <button
-                      onClick={() => deleteSubtask(task.id, sub.id)}
-                      style={{
-                        background: 'transparent',
-                        border: 'none',
-                        color: '#ef4444',
-                        fontSize: '12px',
-                        cursor: 'pointer',
-                        padding: '2px 4px',
-                        borderRadius: '4px',
-                        opacity: 0.6
-                      }}
-                      onMouseOver={(e) => e.target.style.opacity = 1}
-                      onMouseOut={(e) => e.target.style.opacity = 0.6}
-                      title="删除"
-                    >
-                      🗑️
-                    </button>
+                    <div style={{ display: 'flex', gap: '16px', width: isMobile ? '100%' : 'auto', alignItems: 'center' }}>
+                      <button
+                        onClick={() => toggleTask(task.id)}
+                        style={{
+                          width: '24px',
+                          height: '24px',
+                          borderRadius: '6px',
+                          border: task.done ? 'none' : `2px solid ${COLORS.glassBorder}`,
+                          background: task.done ? '#10b981' : 'transparent',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          cursor: 'pointer',
+                          color: '#fff',
+                          fontSize: '14px',
+                          flexShrink: 0,
+                          transition: 'all 0.3s ease',
+                          boxShadow: task.done ? '0 0 10px rgba(16, 185, 129, 0.4)' : 'none'
+                        }}
+                      >
+                        {task.done && '✓'}
+                      </button>
+
+                      <div style={{ flex: 1 }}>
+                        <div
+                          onClick={() => {
+                            setEditingTask(task);
+                            setShowEditModal(true);
+                          }}
+                          style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}
+                        >
+                          <span style={{
+                            fontSize: '15px',
+                            fontWeight: '600',
+                            color: task.done ? COLORS.textSecondary : COLORS.textMain,
+                            textDecoration: task.done ? 'line-through' : 'none',
+                            transition: 'all 0.3s ease',
+                            letterSpacing: '0.3px'
+                          }}>
+                            {task.title}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div style={{ flex: 1, width: '100%' }}>
+                      <div style={{ display: 'flex', gap: '8px', fontSize: '10px', color: COLORS.textSecondary, flexWrap: 'wrap' }}>
+                        <span style={{
+                          padding: '3px 10px',
+                          borderRadius: '6px',
+                          background: 'rgba(255, 255, 255, 0.03)',
+                          border: `1px solid ${COLORS.glassBorder}`,
+                          color: cat.color,
+                          fontWeight: '700',
+                          textTransform: 'uppercase'
+                        }}>
+                          {cat.label}
+                        </span>
+                        {task.isOverdue && !task.done && (
+                          <span style={{
+                            padding: '3px 10px',
+                            borderRadius: '6px',
+                            background: 'rgba(239, 68, 68, 0.1)',
+                            border: '1px solid rgba(239, 68, 68, 0.2)',
+                            color: '#ef4444',
+                            fontWeight: '700'
+                          }}>
+                            已超时
+                          </span>
+                        )}
+                        {task.startTime && (
+                          <span style={{
+                            padding: '3px 10px',
+                            borderRadius: '6px',
+                            background: 'rgba(255, 255, 255, 0.03)',
+                            border: `1px solid ${COLORS.glassBorder}`,
+                            color: COLORS.neonBlue
+                          }}>
+                            {task.startTime}
+                          </span>
+                        )}
+                        <span style={{
+                          padding: '3px 10px',
+                          borderRadius: '6px',
+                          background: 'rgba(255, 255, 255, 0.03)',
+                          border: `1px solid ${COLORS.glassBorder}`
+                        }}>
+                          {task.duration}m
+                        </span>
+                      </div>
+                    </div>
+
+                    <div style={{
+                      display: 'flex',
+                      gap: '10px',
+                      flexShrink: 0,
+                      width: isMobile ? '100%' : 'auto',
+                      justifyContent: isMobile ? 'space-between' : 'flex-start',
+                      marginTop: isMobile ? '8px' : '0'
+                    }}>
+                      {!task.done && !task.subtasks?.length && (
+                        <button
+                          onClick={() => breakdownTask(task.id)}
+                          style={{
+                            flex: isMobile ? 1 : 'none',
+                            padding: '8px 14px',
+                            background: 'transparent',
+                            border: `1px solid ${COLORS.neonBlue}40`,
+                            borderRadius: '8px',
+                            color: COLORS.neonBlue,
+                            fontSize: '11px',
+                            fontWeight: '700',
+                            cursor: 'pointer'
+                          }}
+                        >
+                          拆解
+                        </button>
+                      )}
+                      {!task.done && (
+                        <button
+                          onClick={() => startFocus(task)}
+                          style={{
+                            flex: isMobile ? 1 : 'none',
+                            padding: '8px 14px',
+                            background: `linear-gradient(135deg, ${COLORS.neonBlue}, ${COLORS.accent})`,
+                            border: 'none',
+                            borderRadius: '8px',
+                            color: '#fff',
+                            fontSize: '11px',
+                            fontWeight: '700',
+                            cursor: 'pointer'
+                          }}
+                        >
+                          专注
+                        </button>
+                      )}
+                      <button
+                        onClick={() => deleteTask(task.id)}
+                        style={{
+                          flex: isMobile ? 1 : 'none',
+                          padding: '8px 14px',
+                          background: 'transparent',
+                          border: `1px solid rgba(239, 68, 68, 0.2)`,
+                          borderRadius: '8px',
+                          color: '#ef4444',
+                          fontSize: '11px',
+                          fontWeight: '700',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        删除
+                      </button>
+                    </div>
                   </div>
+
+                  {task.subtasks?.length > 0 && (
+                    <div style={{ marginLeft: '36px', paddingLeft: '16px', borderLeft: '2px solid rgba(99, 179, 237, 0.2)' }}>
+                      {task.subtasks.map((sub, i) => (
+                        <div
+                          key={sub.id}
+                          className="subtask-item"
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '8px',
+                            padding: '8px',
+                            marginBottom: '4px',
+                            borderRadius: '6px',
+                            background: sub.done ? 'rgba(16, 185, 129, 0.05)' : 'transparent',
+                            transition: 'all 0.2s ease',
+                            position: 'relative',
+                          }}
+                        >
+                          <div
+                            onClick={() => toggleSubtask(task.id, sub.id)}
+                            style={{
+                              width: '16px',
+                              height: '16px',
+                              borderRadius: '50%',
+                              border: sub.done ? '2px solid #10b981' : '2px solid rgba(99, 179, 237, 0.3)',
+                              background: sub.done ? '#10b981' : 'transparent',
+                              cursor: 'pointer',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              fontSize: '10px',
+                              color: '#fff',
+                              flexShrink: 0
+                            }}
+                          >
+                            {sub.done && '✓'}
+                          </div>
+                          <span style={{
+                            fontSize: '13px',
+                            color: sub.done ? '#94a3b8' : '#cbd5e1',
+                            textDecoration: sub.done ? 'line-through' : 'none',
+                            flex: 1,
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap'
+                          }}>
+                            {i + 1}. {sub.text}
+                          </span>
+
+                          {/* 子任务操作按钮 */}
+                          <div className="subtask-actions" style={{
+                            display: 'flex',
+                            gap: '8px',
+                            opacity: isMobile ? 0.6 : 0,
+                            transition: 'opacity 0.2s ease'
+                          }}>
+                            <button
+                              onClick={() => setEditingSubtask({ taskId: task.id, subtask: sub })}
+                              style={{
+                                background: 'transparent',
+                                border: 'none',
+                                color: '#00f2ff',
+                                fontSize: '12px',
+                                cursor: 'pointer',
+                                padding: '2px 4px',
+                                borderRadius: '4px',
+                                opacity: 0.6
+                              }}
+                              onMouseOver={(e) => e.target.style.opacity = 1}
+                              onMouseOut={(e) => e.target.style.opacity = 0.6}
+                              title="编辑"
+                            >
+                              ✏️
+                            </button>
+                            <button
+                              onClick={() => deleteSubtask(task.id, sub.id)}
+                              style={{
+                                background: 'transparent',
+                                border: 'none',
+                                color: '#ef4444',
+                                fontSize: '12px',
+                                cursor: 'pointer',
+                                padding: '2px 4px',
+                                borderRadius: '4px',
+                                opacity: 0.6
+                              }}
+                              onMouseOver={(e) => e.target.style.opacity = 1}
+                              onMouseOut={(e) => e.target.style.opacity = 0.6}
+                              title="删除"
+                            >
+                              🗑️
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
-              ))}
-            </div>
-          )}
-        </div>
-      );
-    })}
-  </div>
+              );
+            })}
+          </div>
         </div>
       </div>
 
@@ -2807,7 +2986,7 @@ function MindFlowApp({ userId }) {
         />
       )}
 
-       {showEnergyDetail && (
+      {showEnergyDetail && (
         <EnergyDetailModal
           energyLevel={energyLevel}
           tasks={tasks}
@@ -2835,7 +3014,7 @@ function MindFlowApp({ userId }) {
             // 扣除精力：每分钟专注扣除 0.3 点精力 (可根据需求调整)
             const energyCost = Math.round(finalMinutes * 0.3);
             setEnergyLevel(prev => Math.max(0, prev - energyCost));
-            
+
             // 弹出能效提示
             setEnergyNotification({
               visible: true,
@@ -2903,9 +3082,9 @@ function FocusModal({ task, onClose, onComplete, onBreakdown, onToggleSubtask, o
   };
 
   const progress = (timeLeft / (task.duration * 60)) * 100;
-  
+
   // 计算子任务完成度
-  const subtaskProgress = task.subtasks?.length > 0 
+  const subtaskProgress = task.subtasks?.length > 0
     ? Math.round((task.subtasks.filter(s => s.done).length / task.subtasks.length) * 100)
     : 0;
 
@@ -2976,7 +3155,7 @@ function FocusModal({ task, onClose, onComplete, onBreakdown, onToggleSubtask, o
         }}>
           Deep Focus Session
         </div>
-        
+
         <h2 style={{
           fontSize: isMobile ? '24px' : '32px',
           fontWeight: '800',
@@ -2998,7 +3177,7 @@ function FocusModal({ task, onClose, onComplete, onBreakdown, onToggleSubtask, o
           justifyContent: 'center'
         }}>
           {/* 呼吸灯动效 SVG - 增加 viewBox 范围防止发光剪切 */}
-          <svg 
+          <svg
             viewBox={isMobile ? "-40 -40 320 320" : "-50 -50 400 400"}
             style={{
               position: 'absolute',
@@ -3051,7 +3230,7 @@ function FocusModal({ task, onClose, onComplete, onBreakdown, onToggleSubtask, o
               strokeDasharray={isMobile ? '691' : '880'}
               strokeDashoffset={isMobile ? 691 * (1 - progress / 100) : 880 * (1 - progress / 100)}
               strokeLinecap="round"
-              style={{ 
+              style={{
                 transition: 'stroke-dashoffset 1s linear',
                 filter: 'url(#neon-glow-wide)',
                 opacity: 0.3
@@ -3070,7 +3249,7 @@ function FocusModal({ task, onClose, onComplete, onBreakdown, onToggleSubtask, o
               strokeDasharray={isMobile ? '691' : '880'}
               strokeDashoffset={isMobile ? 691 * (1 - progress / 100) : 880 * (1 - progress / 100)}
               strokeLinecap="round"
-              style={{ 
+              style={{
                 transition: 'stroke-dashoffset 1s linear',
                 filter: 'url(#neon-glow-core)',
                 opacity: 0.95
@@ -3085,7 +3264,7 @@ function FocusModal({ task, onClose, onComplete, onBreakdown, onToggleSubtask, o
             justifyContent: 'center',
             zIndex: 2
           }}>
-            <div 
+            <div
               className="timer-text"
               style={{
                 fontFamily: '"JetBrains Mono", monospace',
@@ -3223,12 +3402,12 @@ function FocusModal({ task, onClose, onComplete, onBreakdown, onToggleSubtask, o
                 opacity: 0.8
               }}
             >
-              {isBreakingDown ? '正在进行 AI 深度拆解...' : '✨ 智脑任务拆解'}
+              {isBreakingDown ? '正在进行第一性原理分析...' : '🔬 第一性原理拆解'}
             </button>
           )}
 
           {task.subtasks?.length > 0 && (
-            <div 
+            <div
               className="subtasks-container"
               style={{
                 maxHeight: '100px',
@@ -3237,8 +3416,8 @@ function FocusModal({ task, onClose, onComplete, onBreakdown, onToggleSubtask, o
               }}
             >
               {task.subtasks.map((sub, i) => (
-                <div 
-                  key={sub.id} 
+                <div
+                  key={sub.id}
                   className="subtask-item-focus"
                   style={{
                     display: 'flex',
@@ -3250,7 +3429,7 @@ function FocusModal({ task, onClose, onComplete, onBreakdown, onToggleSubtask, o
                     position: 'relative'
                   }}
                 >
-                  <div 
+                  <div
                     onClick={(e) => {
                       e.stopPropagation();
                       onToggleSubtask(task.id, sub.id);
@@ -3260,9 +3439,9 @@ function FocusModal({ task, onClose, onComplete, onBreakdown, onToggleSubtask, o
                       background: sub.done ? '#10b981' : COLORS.neonBlue,
                       boxShadow: `0 0 6px ${sub.done ? '#10b981' : COLORS.neonBlue}`,
                       flexShrink: 0
-                    }} 
+                    }}
                   />
-                  <span 
+                  <span
                     onClick={() => onToggleSubtask(task.id, sub.id)}
                     style={{
                       fontSize: '12px',
@@ -3274,7 +3453,7 @@ function FocusModal({ task, onClose, onComplete, onBreakdown, onToggleSubtask, o
                   >
                     {sub.text}
                   </span>
-                  
+
                   {/* 子任务操作按钮 (专注界面) */}
                   <div className="subtask-actions-focus" style={{
                     display: 'flex',
@@ -3349,6 +3528,15 @@ function FocusModal({ task, onClose, onComplete, onBreakdown, onToggleSubtask, o
           0%, 100% { transform: scale(1); opacity: 0.5; }
           50% { transform: scale(1.1); opacity: 0.8; }
         }
+        @keyframes surge-up {
+          0%   { transform: rotate(var(--deg, 0deg)) translateY(-10px) scale(1); opacity: 0.9; }
+          60%  { opacity: 0.7; }
+          100% { transform: rotate(var(--deg, 0deg)) translateY(-60px) scale(0.3); opacity: 0; }
+        }
+        @keyframes spin {
+          0%   { transform: rotate(0deg); }
+          100% { transform: rotate(360deg); }
+        }
         .subtasks-container::-webkit-scrollbar {
           display: none;
         }
@@ -3371,7 +3559,7 @@ function FocusModal({ task, onClose, onComplete, onBreakdown, onToggleSubtask, o
 
 function EnergyOrb({ energyLevel, phase, tasks, isMobile = false }) {
   const status = getEnergyStatus(energyLevel);
-  
+
   // 赛博朋克霓虹色彩覆盖
   const getCyberColors = (level) => {
     if (level >= 80) return { primary: '#00f2ff', secondary: '#0066ff', glow: 'rgba(0, 242, 255, 0.6)', label: '超能模式' };
@@ -3383,7 +3571,7 @@ function EnergyOrb({ energyLevel, phase, tasks, isMobile = false }) {
   const colors = getCyberColors(energyLevel);
   const rippleIntensity = status.rippleIntensity;
   const pulse = 1 + Math.sin(phase * 0.05) * 0.03 * rippleIntensity;
-  
+
   const size = isMobile ? 90 : 110; // 进一步减小尺寸以节省空间
   const innerSize = size * 0.82;
 
@@ -3424,7 +3612,7 @@ function EnergyOrb({ energyLevel, phase, tasks, isMobile = false }) {
           transform: `rotate(${-phase * 0.2}deg)`,
           opacity: 0.3
         }} />
-        
+
         {/* 扫描线效果 */}
         <div style={{
           position: 'absolute',
@@ -3483,6 +3671,7 @@ function EnergyOrb({ energyLevel, phase, tasks, isMobile = false }) {
               opacity: 0.7,
               transform: `translateX(${Math.sin(phase * 0.08) * 40}px) rotate(${phase * 2}deg)`
             }} />
+
           </div>
 
           {/* 文字内容 - 置于球体中心 */}
@@ -3520,23 +3709,23 @@ function EnergyOrb({ energyLevel, phase, tasks, isMobile = false }) {
 
           {/* 故障效果装饰 (仅在低能量或随机出现) */}
           {(energyLevel < 20 || Math.sin(phase * 0.5) > 0.98) && (
-             <div style={{
-               position: 'absolute',
-               top: '20%', left: 0, width: '100%', height: '1px',
-               background: '#ff0055', boxShadow: '0 0 5px #ff0055',
-               zIndex: 15, opacity: 0.5,
-               transform: `translateX(${Math.random() * 10 - 5}px)`,
-               filter: 'hue-rotate(90deg)'
-             }} />
+            <div style={{
+              position: 'absolute',
+              top: '20%', left: 0, width: '100%', height: '1px',
+              background: '#ff0055', boxShadow: '0 0 5px #ff0055',
+              zIndex: 15, opacity: 0.5,
+              transform: `translateX(${Math.random() * 10 - 5}px)`,
+              filter: 'hue-rotate(90deg)'
+            }} />
           )}
           {(energyLevel < 20 || Math.sin(phase * 0.5 + 1) > 0.98) && (
-             <div style={{
-               position: 'absolute',
-               bottom: '30%', right: 0, width: '80%', height: '1px',
-               background: COLORS.neonBlue, boxShadow: `0 0 5px ${COLORS.neonBlue}`,
-               zIndex: 15, opacity: 0.4,
-               transform: `translateX(${Math.random() * 10 - 5}px)`,
-             }} />
+            <div style={{
+              position: 'absolute',
+              bottom: '30%', right: 0, width: '80%', height: '1px',
+              background: COLORS.neonBlue, boxShadow: `0 0 5px ${COLORS.neonBlue}`,
+              zIndex: 15, opacity: 0.4,
+              transform: `translateX(${Math.random() * 10 - 5}px)`,
+            }} />
           )}
 
           {/* 内部噪点纹理 */}
@@ -3561,7 +3750,7 @@ function EnergyOrb({ energyLevel, phase, tasks, isMobile = false }) {
               background: colors.primary,
               borderRadius: '50%',
               boxShadow: `0 0 6px ${colors.primary}`,
-              transform: `rotate(${phase * (0.5 + i * 0.2) + i * 60}deg) translateX(${size/2 + 6}px)`,
+              transform: `rotate(${phase * (0.5 + i * 0.2) + i * 60}deg) translateX(${size / 2 + 6}px)`,
               opacity: 0.6 + Math.sin(phase * 0.1 + i) * 0.3
             }}
           />
@@ -3580,7 +3769,7 @@ function EnergyDetailModal({ energyLevel, tasks, onClose, isMobile = false }) {
   const totalTasks = tasks.length;
   const completedTasks = tasks.filter(t => t.done).length;
   const pendingTasks = totalTasks - completedTasks;
-  
+
   const tasksByCategory = {
     work: tasks.filter(t => t.category === 'work' && !t.done).length,
     study: tasks.filter(t => t.category === 'study' && !t.done).length,
@@ -3631,8 +3820,8 @@ function EnergyDetailModal({ energyLevel, tasks, onClose, isMobile = false }) {
             letterSpacing: '2px',
             textTransform: 'uppercase'
           }}>
-              系统诊断
-            </h2>
+            系统诊断
+          </h2>
           <button
             onClick={onClose}
             style={{
