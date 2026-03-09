@@ -1622,12 +1622,16 @@ function MindFlowApp({ userId }) {
     });
   }, [tasks, taskFilter, taskSort]);
 
-  const stats = useMemo(() => ({
-    total: tasks.length,
-    done: tasks.filter(t => t.done).length,
-    pending: tasks.filter(t => !t.done).length,
-    focusMinutes: 45 // 模拟数据
-  }), [tasks]);
+  const stats = useMemo(() => {
+    const doneTasks = tasks.filter(t => t.done);
+    const focusTotal = doneTasks.reduce((sum, t) => sum + (Number(t.duration) || 30), 0);
+    return {
+      total: tasks.length,
+      done: doneTasks.length,
+      pending: tasks.filter(t => !t.done).length,
+      focusMinutes: focusTotal
+    };
+  }, [tasks]);
 
   // 日历逻辑
   const changeMonth = (offset) => {
